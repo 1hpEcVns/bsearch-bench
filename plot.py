@@ -23,18 +23,8 @@ def log_cross(x1, y1a, y1b, x2, y2a, y2b):
 
 def crossover(df, col_brute, col_bin):
     xs = df["n"].to_numpy()
-    a = (
-        df[col_brute]
-        .rolling(5, center=True, min_periods=1)
-        .median()
-        .to_numpy()
-    )
-    b = (
-        df[col_bin]
-        .rolling(5, center=True, min_periods=1)
-        .median()
-        .to_numpy()
-    )
+    a = df[col_brute].to_numpy()
+    b = df[col_bin].to_numpy()
     faster = (a < b).astype(int)  # 1: brute faster
     for i in range(len(xs) - 1):
         if faster[i] == 1 and faster[i + 1] == 0:

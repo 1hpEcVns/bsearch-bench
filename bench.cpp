@@ -161,25 +161,49 @@ static bool verify_type(std::uint64_t seed) {
 }
 
 // ---------- measurement ----------
-static const size_t ROUNDS = 11;
+static constexpr size_t ROUNDS = 9;
+static constexpr double TARGET_NS = 3e6; // ~3 ms per timed pass
+static constexpr size_t Q_MIN = 1024;
+static constexpr size_t Q_MAX = 4'000'000;
 
-template <class T, class F>
-static double bench_one(const T* a, size_t n, const std::vector<T>& xs, F f) {
+template <class T>
+static std::vector<T> make_queries(const std::vector<T>& a, size_t n, size_t q,
+                                   std::mt19937_64& rng) {
+    std::vector<T> xs(q);
+    for (size_t i = 0; i < q; ++i) xs[i] = a[rng() % n];
+    return xs;
+}
+
+// METHOD 0 = AVX2 brute, 1 = branchless, 2 = normal branchy.
+template <class T, int METHOD>
+static double time_method(const T* a, size_t n, const std::vector<T>& xs) {
     std::uint64_t acc = 0;
-    acc += f(a, n, xs[0]);
-    black_box_u64(acc);
-
-    double best = 1e300;
-    for (size_t r = 0; r < ROUNDS; ++r) {
-        acc = 0;
-        auto t0 = std::chrono::steady_clock::now();
-        for (T x : xs) acc += (std::uint64_t)f(a, n, x);
-        auto t1 = std::chrono::steady_clock::now();
-        black_box_u64(acc);
-        double ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
-        if (ns < best) best = ns;
+    auto t0 = std::chrono::steady_clock::now();
+    if constexpr (METHOD == 0) {
+        for (T x : xs) acc += (std::uint64_t)avx2_lower_bound(a, n, x);
+    } else if constexpr (METHOD == 1) {
+        for (T x : xs) acc += (std::uint64_t)lower_bound_branchless(a, n, x);
+    } else {
+        for (T x : xs) acc += (std::uint64_t)lower_bound_branchy(a, n, x);
     }
-    return best / (double)xs.size();
+    auto t1 = std::chrono::steady_clock::now();
+    black_box_u64(acc);
+    return std::chrono::duration<double, std::nano>(t1 - t0).count();
+}
+
+template <class T, int METHOD>
+static size_t calibrate_q(const std::vector<T>& a, size_t n, size_t q0,
+                          std::mt19937_64& rng) {
+    auto xs = make_queries(a, n, q0, rng);
+    double ns = time_method<T, METHOD>(a.data(), n, xs);
+    double per = ns / (double)q0;
+    size_t q = (size_t)(TARGET_NS / per);
+    return std::clamp(q, Q_MIN, Q_MAX);
+}
+
+static double median(std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
 }
 
 template <class T>
@@ -200,32 +224,47 @@ static void run_type(const char* name) {
         std::vector<T> a(n + W, (T)-1);
         for (size_t i = 0; i < n; ++i) a[i] = (T)i;
 
-        size_t q_brute = std::min<size_t>(
-            65536, std::max<size_t>(64, 400'000'000u / std::max<size_t>(n / 2, 1)));
-        size_t q_bin = 65536;
+        size_t q0_brute = std::clamp<size_t>(4'000'000u / std::max<size_t>(n / 2, 1), Q_MIN, 262144u);
+        size_t q_brute = calibrate_q<T, 0>(a, n, q0_brute, rng);
+        size_t q_branchless = calibrate_q<T, 1>(a, n, 65536, rng);
+        size_t q_branchy = calibrate_q<T, 2>(a, n, 65536, rng);
 
-        std::vector<T> xs_brute(q_brute), xs_bin(q_bin);
-        for (size_t i = 0; i < q_brute; ++i) xs_brute[i] = a[rng() % n];
-        for (size_t i = 0; i < q_bin; ++i) xs_bin[i] = a[rng() % n];
+        auto xs_brute = make_queries(a, n, q_brute, rng);
+        auto xs_branchless = make_queries(a, n, q_branchless, rng);
+        auto xs_branchy = make_queries(a, n, q_branchy, rng);
 
         // Present queries: expected index is the generated index itself.
         for (size_t i = 0; i < q_brute; ++i)
             if (avx2_lower_bound(a.data(), n, xs_brute[i]) != (size_t)xs_brute[i])
                 std::abort();
-        for (size_t i = 0; i < q_bin; ++i) {
-            T x = xs_bin[i];
+        for (size_t i = 0; i < q_branchless; ++i) {
+            T x = xs_branchless[i];
+            if (lower_bound_branchy(a.data(), n, x) != (size_t)x ||
+                lower_bound_branchless(a.data(), n, x) != (size_t)x ||
+                avx2_lower_bound(a.data(), n, x) != (size_t)x)
+                std::abort();
+        }
+        for (size_t i = 0; i < q_branchy; ++i) {
+            T x = xs_branchy[i];
             if (lower_bound_branchy(a.data(), n, x) != (size_t)x ||
                 lower_bound_branchless(a.data(), n, x) != (size_t)x ||
                 avx2_lower_bound(a.data(), n, x) != (size_t)x)
                 std::abort();
         }
 
-        double t_brute = bench_one(a.data(), n, xs_brute,
-            [](const T* p, size_t m, T x) { return avx2_lower_bound(p, m, x); });
-        double t_branchless = bench_one(a.data(), n, xs_bin,
-            [](const T* p, size_t m, T x) { return lower_bound_branchless(p, m, x); });
-        double t_branchy = bench_one(a.data(), n, xs_bin,
-            [](const T* p, size_t m, T x) { return lower_bound_branchy(p, m, x); });
+        std::vector<double> s_brute, s_branchless, s_branchy;
+        s_brute.reserve(ROUNDS);
+        s_branchless.reserve(ROUNDS);
+        s_branchy.reserve(ROUNDS);
+        for (size_t r = 0; r < ROUNDS; ++r) {
+            s_brute.push_back(time_method<T, 0>(a.data(), n, xs_brute));
+            s_branchless.push_back(time_method<T, 1>(a.data(), n, xs_branchless));
+            s_branchy.push_back(time_method<T, 2>(a.data(), n, xs_branchy));
+        }
+
+        double t_brute = median(s_brute) / (double)q_brute;
+        double t_branchless = median(s_branchless) / (double)q_branchless;
+        double t_branchy = median(s_branchy) / (double)q_branchy;
 
         std::printf("%s,%zu,%.3f,%.3f,%.3f\n", name, n, t_brute, t_branchless, t_branchy);
         std::fflush(stdout);

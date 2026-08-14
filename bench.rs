@@ -6,7 +6,18 @@ type U8 = u8;
 type U16 = u16;
 type U32 = u32;
 
-const ROUNDS: usize = 11;
+const ROUNDS: usize = 9;
+const TARGET_NS: f64 = 3e6;
+const Q_MIN: usize = 1024;
+const Q_MAX: usize = 4_000_000;
+
+fn rng_next(seed: &mut u64) -> u64 {
+    *seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *seed;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
 
 trait BenchVal: Copy + Ord {
     const ZERO: Self;
@@ -69,6 +80,7 @@ unsafe fn avx2_lower_bound_u8(a: &[u8], logical: usize, x: u8) -> usize {
     n
 }
 
+#[inline(never)]
 unsafe fn avx2_lower_bound_u16(a: &[u16], logical: usize, x: u16) -> usize {
     let n = logical;
     let mut i = 0usize;
@@ -91,6 +103,7 @@ unsafe fn avx2_lower_bound_u16(a: &[u16], logical: usize, x: u16) -> usize {
     n
 }
 
+#[inline(never)]
 unsafe fn avx2_lower_bound_u32(a: &[u32], logical: usize, x: u32) -> usize {
     let n = logical;
     let mut i = 0usize;
@@ -125,25 +138,54 @@ fn avx2_lower_bound<T: BenchVal>(a: &[T], logical: usize, x: T) -> usize {
     }
 }
 
-fn bench_one<T: Copy, F: Fn(&[T], T) -> usize>(a: &[T], xs: &[T], f: F) -> f64 {
+fn make_queries<T: BenchVal>(a: &[T], n: usize, q: usize, seed: &mut u64) -> Vec<T> {
+    let mut xs = Vec::with_capacity(q);
+    for _ in 0..q {
+        xs.push(a[((rng_next(seed) >> 32) % n as u64) as usize]);
+    }
+    xs
+}
+
+// METHOD 0 = AVX2 brute, 1 = branchless (partition_point), 2 = normal branchy.
+#[inline(never)]
+fn time_method<T: BenchVal, const METHOD: usize>(a: &[T], n: usize, xs: &[T]) -> f64 {
     let mut acc = 0usize;
-    acc += f(a, xs[0]);
-    black_box(acc);
-    let mut best = f64::INFINITY;
-    for _ in 0..ROUNDS {
-        acc = 0;
-        let t0 = Instant::now();
+    let t0 = Instant::now();
+    if METHOD == 0 {
         for &x in xs {
-            acc += f(a, x);
+            acc += avx2_lower_bound(a, n, x);
         }
-        let t1 = Instant::now();
-        black_box(acc);
-        let ns = t1.duration_since(t0).as_secs_f64() * 1e9;
-        if ns < best {
-            best = ns;
+    } else if METHOD == 1 {
+        let core = &a[..n];
+        for &x in xs {
+            acc += core.partition_point(|&v| v < x);
+        }
+    } else {
+        let core = &a[..n];
+        for &x in xs {
+            acc += lower_bound_branchy(core, x);
         }
     }
-    best / xs.len() as f64
+    let t1 = Instant::now();
+    black_box(acc);
+    t1.duration_since(t0).as_secs_f64() * 1e9
+}
+
+fn calibrate_q<T: BenchVal, const METHOD: usize>(
+    a: &[T],
+    n: usize,
+    q0: usize,
+    seed: &mut u64,
+) -> usize {
+    let xs = make_queries(a, n, q0, seed);
+    let ns = time_method::<T, METHOD>(a, n, &xs);
+    let per = ns / q0 as f64;
+    ((TARGET_NS / per) as usize).clamp(Q_MIN, Q_MAX)
+}
+
+fn median(v: &mut Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.total_cmp(b));
+    v[v.len() / 2]
 }
 
 fn run_type<T: BenchVal>(name: &str) {
@@ -163,10 +205,6 @@ fn run_type<T: BenchVal>(name: &str) {
     ];
 
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-    let mut rng = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        seed
-    };
 
     for &n in &all_n {
         if n > max_n {
@@ -177,40 +215,47 @@ fn run_type<T: BenchVal>(name: &str) {
             a[i] = T::from_usize(i);
         }
 
-        let q_brute = (400_000_000usize / (n / 2).max(1)).clamp(64, 65536);
-        let q_bin = 65536usize;
-        let mut xs_brute = Vec::with_capacity(q_brute);
-        let mut xs_bin = Vec::with_capacity(q_bin);
-        for _ in 0..q_brute {
-            xs_brute.push(a[(rng() % n as u64) as usize]);
-        }
-        for _ in 0..q_bin {
-            xs_bin.push(a[(rng() % n as u64) as usize]);
-        }
+        let q0_brute = (4_000_000usize / (n / 2).max(1)).clamp(Q_MIN, 262144);
+        let q_brute = calibrate_q::<T, 0>(&a, n, q0_brute, &mut seed);
+        let q_branchless = calibrate_q::<T, 1>(&a, n, 65536, &mut seed);
+        let q_branchy = calibrate_q::<T, 2>(&a, n, 65536, &mut seed);
+
+        let xs_brute = make_queries(&a, n, q_brute, &mut seed);
+        let xs_branchless = make_queries(&a, n, q_branchless, &mut seed);
+        let xs_branchy = make_queries(&a, n, q_branchy, &mut seed);
 
         for &x in &xs_brute {
             assert_eq!(avx2_lower_bound(&a, n, x), x.to_usize());
         }
-        for &x in &xs_bin {
+        for &x in &xs_branchless {
+            assert_eq!(lower_bound_branchy(&a[..n], x), x.to_usize());
+            assert_eq!(a[..n].partition_point(|&v| v < x), x.to_usize());
+            assert_eq!(avx2_lower_bound(&a, n, x), x.to_usize());
+        }
+        for &x in &xs_branchy {
             assert_eq!(lower_bound_branchy(&a[..n], x), x.to_usize());
             assert_eq!(a[..n].partition_point(|&v| v < x), x.to_usize());
             assert_eq!(avx2_lower_bound(&a, n, x), x.to_usize());
         }
 
-        let t_brute = bench_one(&a, &xs_brute, |a, x| avx2_lower_bound(a, n, x));
-        let core = &a[..n];
-        let t_branchless = bench_one(core, &xs_bin, |a, x| a.partition_point(|&v| v < x));
-        let t_branchy = bench_one(core, &xs_bin, lower_bound_branchy::<T>);
+        let mut s_brute = Vec::with_capacity(ROUNDS);
+        let mut s_branchless = Vec::with_capacity(ROUNDS);
+        let mut s_branchy = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            s_brute.push(time_method::<T, 0>(&a, n, &xs_brute));
+            s_branchless.push(time_method::<T, 1>(&a, n, &xs_branchless));
+            s_branchy.push(time_method::<T, 2>(&a, n, &xs_branchy));
+        }
+
+        let t_brute = median(&mut s_brute) / q_brute as f64;
+        let t_branchless = median(&mut s_branchless) / q_branchless as f64;
+        let t_branchy = median(&mut s_branchy) / q_branchy as f64;
         println!("{name},{n},{t_brute:.3},{t_branchless:.3},{t_branchy:.3}");
     }
 }
 
 fn verify<T: BenchVal>() {
     let mut seed = 12345u64;
-    let mut rng = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        seed
-    };
     let w = 32 / std::mem::size_of::<T>();
     for &n in &[1usize, 7, 64, 257, 4096] {
         if std::mem::size_of::<T>() == 1 && n > 256 {
@@ -224,7 +269,7 @@ fn verify<T: BenchVal>() {
             a[i] = T::from_usize(i);
         }
         for _ in 0..2000 {
-            let x = T::from_usize((rng() % (n as u64 * 2 + 1)) as usize);
+            let x = T::from_usize(((rng_next(&mut seed) >> 32) % (n as u64 * 2 + 1)) as usize);
             let want = a[..n].partition_point(|&v| v < x);
             assert_eq!(lower_bound_branchy(&a[..n], x), want);
             assert_eq!(a[..n].partition_point(|&v| v < x), want);

@@ -1,4 +1,4 @@
-.PHONY: all bench bench-rs plot
+.PHONY: all bench bench-rs bench-all plot
 
 CXX ?= g++
 CXXFLAGS ?= -O3 -mavx2 -std=c++23
@@ -17,6 +17,8 @@ bench-run: bench
 
 bench-run-rs: bench-rs
 	taskset -c 0 ./bench_rs > results_rs.csv
+
+bench-all: bench-run bench-run-rs
 
 plot: bench-run
 	nix develop --command python3 plot.py
