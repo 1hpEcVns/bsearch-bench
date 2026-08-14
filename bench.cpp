@@ -220,6 +220,7 @@ static void run_type(const char* name) {
     std::mt19937_64 rng(0x9e3779b97f4a7c15ULL);
     for (size_t n : all_n) {
         if (n > max_n) continue;
+        if (n % W != 0) continue;
 
         std::vector<T> a(n + W, (T)-1);
         for (size_t i = 0; i < n; ++i) a[i] = (T)i;

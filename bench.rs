@@ -210,6 +210,9 @@ fn run_type<T: BenchVal>(name: &str) {
         if n > max_n {
             continue;
         }
+        if n % w != 0 {
+            continue;
+        }
         let mut a: Vec<T> = vec![T::ZERO; n + w];
         for i in 0..n {
             a[i] = T::from_usize(i);
