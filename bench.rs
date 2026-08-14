@@ -22,25 +22,21 @@ fn rng_next(seed: &mut u64) -> u64 {
 trait BenchVal: Copy + Ord {
     const ZERO: Self;
     fn from_usize(v: usize) -> Self;
-    fn to_usize(self) -> usize;
 }
 
 impl BenchVal for u8 {
     const ZERO: Self = 0;
     fn from_usize(v: usize) -> Self { v as u8 }
-    fn to_usize(self) -> usize { self as usize }
 }
 
 impl BenchVal for u16 {
     const ZERO: Self = 0;
     fn from_usize(v: usize) -> Self { v as u16 }
-    fn to_usize(self) -> usize { self as usize }
 }
 
 impl BenchVal for u32 {
     const ZERO: Self = 0;
     fn from_usize(v: usize) -> Self { v as u32 }
-    fn to_usize(self) -> usize { self as usize }
 }
 
 fn lower_bound_branchy<T: Ord + Copy>(a: &[T], x: T) -> usize {
@@ -188,14 +184,18 @@ fn median(v: &mut Vec<f64>) -> f64 {
     v[v.len() / 2]
 }
 
-fn run_type<T: BenchVal>(name: &str) {
-    let max_n = if std::mem::size_of::<T>() == 1 {
+fn value_domain<T: BenchVal>(n: usize) -> usize {
+    if std::mem::size_of::<T>() == 1 {
         256
     } else if std::mem::size_of::<T>() == 2 {
         65536
     } else {
-        1_048_576
-    };
+        n
+    }
+}
+
+fn run_type<T: BenchVal>(name: &str) {
+    let max_n = 1_048_576;
     let w = 32 / std::mem::size_of::<T>();
     let all_n = [
         4usize, 8, 12, 16, 20, 24, 28, 32, 40, 44, 48, 52, 60, 64, 96, 128, 192,
@@ -213,9 +213,10 @@ fn run_type<T: BenchVal>(name: &str) {
         if n % w != 0 {
             continue;
         }
+        let domain = value_domain::<T>(n);
         let mut a: Vec<T> = vec![T::ZERO; n + w];
         for i in 0..n {
-            a[i] = T::from_usize(i);
+            a[i] = T::from_usize(i * domain / n);
         }
 
         let q0_brute = (4_000_000usize / (n / 2).max(1)).clamp(Q_MIN, 262144);
@@ -228,17 +229,20 @@ fn run_type<T: BenchVal>(name: &str) {
         let xs_branchy = make_queries(&a, n, q_branchy, &mut seed);
 
         for &x in &xs_brute {
-            assert_eq!(avx2_lower_bound(&a, n, x), x.to_usize());
+            let want = a[..n].partition_point(|&v| v < x);
+            assert_eq!(avx2_lower_bound(&a, n, x), want);
         }
         for &x in &xs_branchless {
-            assert_eq!(lower_bound_branchy(&a[..n], x), x.to_usize());
-            assert_eq!(a[..n].partition_point(|&v| v < x), x.to_usize());
-            assert_eq!(avx2_lower_bound(&a, n, x), x.to_usize());
+            let want = a[..n].partition_point(|&v| v < x);
+            assert_eq!(lower_bound_branchy(&a[..n], x), want);
+            assert_eq!(a[..n].partition_point(|&v| v < x), want);
+            assert_eq!(avx2_lower_bound(&a, n, x), want);
         }
         for &x in &xs_branchy {
-            assert_eq!(lower_bound_branchy(&a[..n], x), x.to_usize());
-            assert_eq!(a[..n].partition_point(|&v| v < x), x.to_usize());
-            assert_eq!(avx2_lower_bound(&a, n, x), x.to_usize());
+            let want = a[..n].partition_point(|&v| v < x);
+            assert_eq!(lower_bound_branchy(&a[..n], x), want);
+            assert_eq!(a[..n].partition_point(|&v| v < x), want);
+            assert_eq!(avx2_lower_bound(&a, n, x), want);
         }
 
         let mut s_brute = Vec::with_capacity(ROUNDS);
@@ -261,18 +265,13 @@ fn verify<T: BenchVal>() {
     let mut seed = 12345u64;
     let w = 32 / std::mem::size_of::<T>();
     for &n in &[1usize, 7, 64, 257, 4096] {
-        if std::mem::size_of::<T>() == 1 && n > 256 {
-            continue;
-        }
-        if std::mem::size_of::<T>() == 2 && n > 65536 {
-            continue;
-        }
+        let domain = value_domain::<T>(n);
         let mut a: Vec<T> = vec![T::ZERO; n + w];
         for i in 0..n {
-            a[i] = T::from_usize(i);
+            a[i] = T::from_usize(i * domain / n);
         }
         for _ in 0..2000 {
-            let x = T::from_usize(((rng_next(&mut seed) >> 32) % (n as u64 * 2 + 1)) as usize);
+            let x = T::from_usize(((rng_next(&mut seed) >> 32) % (domain as u64 + 1)) as usize);
             let want = a[..n].partition_point(|&v| v < x);
             assert_eq!(lower_bound_branchy(&a[..n], x), want);
             assert_eq!(a[..n].partition_point(|&v| v < x), want);

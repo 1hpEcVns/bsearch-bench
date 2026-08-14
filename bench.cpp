@@ -133,20 +133,23 @@ static size_t avx2_lower_bound(const T* a, size_t n, T x) {
 
 // ---------- verification ----------
 template <class T>
+static size_t value_domain(size_t n) {
+    if constexpr (std::is_same_v<T, u8>) return 256;
+    if constexpr (std::is_same_v<T, u16>) return 65536;
+    return n;
+}
+
+template <class T>
 static bool verify_type(std::uint64_t seed) {
     std::mt19937_64 rng(seed);
     constexpr size_t W = 32 / sizeof(T);
     for (size_t n : {1u, 7u, 64u, 257u, 4096u}) {
-        if constexpr (std::is_same_v<T, u8>) {
-            if (n > 256) continue;
-        } else if constexpr (std::is_same_v<T, u16>) {
-            if (n > 65536) continue;
-        }
+        size_t domain = value_domain<T>(n);
         std::vector<T> a(n + W, (T)-1);
-        for (size_t i = 0; i < n; ++i) a[i] = (T)i;
+        for (size_t i = 0; i < n; ++i) a[i] = (T)(i * domain / n);
         for (size_t q = 0; q < 2000; ++q) {
-            T x = (T)(rng() % (n * 2 + 1));
-            size_t want = (size_t)(std::lower_bound(a.begin(), a.end(), x) - a.begin());
+            T x = (T)(rng() % (domain + 1));
+            size_t want = (size_t)(std::lower_bound(a.begin(), a.begin() + n, x) - a.begin());
             size_t g1 = lower_bound_branchy(a.data(), n, x);
             size_t g2 = lower_bound_branchless(a.data(), n, x);
             size_t g3 = avx2_lower_bound(a.data(), n, x);
@@ -208,7 +211,7 @@ static double median(std::vector<double> v) {
 
 template <class T>
 static void run_type(const char* name) {
-    const size_t max_n = std::is_same_v<T, u8> ? 256u : (std::is_same_v<T, u16> ? 65536u : 1048576u);
+    const size_t max_n = 1048576u;
     constexpr size_t W = 32 / sizeof(T);
     const std::vector<size_t> all_n = {
         4, 8, 12, 16, 20, 24, 28, 32, 40, 44, 48, 52, 60, 64, 96, 128, 192,
@@ -222,8 +225,9 @@ static void run_type(const char* name) {
         if (n > max_n) continue;
         if (n % W != 0) continue;
 
+        size_t domain = value_domain<T>(n);
         std::vector<T> a(n + W, (T)-1);
-        for (size_t i = 0; i < n; ++i) a[i] = (T)i;
+        for (size_t i = 0; i < n; ++i) a[i] = (T)(i * domain / n);
 
         size_t q0_brute = std::clamp<size_t>(4'000'000u / std::max<size_t>(n / 2, 1), Q_MIN, 262144u);
         size_t q_brute = calibrate_q<T, 0>(a, n, q0_brute, rng);
@@ -234,22 +238,28 @@ static void run_type(const char* name) {
         auto xs_branchless = make_queries(a, n, q_branchless, rng);
         auto xs_branchy = make_queries(a, n, q_branchy, rng);
 
-        // Present queries: expected index is the generated index itself.
-        for (size_t i = 0; i < q_brute; ++i)
-            if (avx2_lower_bound(a.data(), n, xs_brute[i]) != (size_t)xs_brute[i])
+        // Queries come from the array, but with duplicates the answer is the
+        // first occurrence, so compare against std::lower_bound.
+        for (size_t i = 0; i < q_brute; ++i) {
+            T x = xs_brute[i];
+            size_t want = (size_t)(std::lower_bound(a.data(), a.data() + n, x) - a.data());
+            if (avx2_lower_bound(a.data(), n, x) != want)
                 std::abort();
+        }
         for (size_t i = 0; i < q_branchless; ++i) {
             T x = xs_branchless[i];
-            if (lower_bound_branchy(a.data(), n, x) != (size_t)x ||
-                lower_bound_branchless(a.data(), n, x) != (size_t)x ||
-                avx2_lower_bound(a.data(), n, x) != (size_t)x)
+            size_t want = (size_t)(std::lower_bound(a.data(), a.data() + n, x) - a.data());
+            if (lower_bound_branchy(a.data(), n, x) != want ||
+                lower_bound_branchless(a.data(), n, x) != want ||
+                avx2_lower_bound(a.data(), n, x) != want)
                 std::abort();
         }
         for (size_t i = 0; i < q_branchy; ++i) {
             T x = xs_branchy[i];
-            if (lower_bound_branchy(a.data(), n, x) != (size_t)x ||
-                lower_bound_branchless(a.data(), n, x) != (size_t)x ||
-                avx2_lower_bound(a.data(), n, x) != (size_t)x)
+            size_t want = (size_t)(std::lower_bound(a.data(), a.data() + n, x) - a.data());
+            if (lower_bound_branchy(a.data(), n, x) != want ||
+                lower_bound_branchless(a.data(), n, x) != want ||
+                avx2_lower_bound(a.data(), n, x) != want)
                 std::abort();
         }
 
