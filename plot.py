@@ -112,6 +112,56 @@ def plot_source(csv_path, out_prefix, title_label):
         )
 
 
+def plot_cpp_vs_rust():
+    cpp = pd.read_csv(
+        "results.csv",
+        names=["type", "n", "avx2_brute_ns", "branchless_ns", "branchy_ns"],
+    )
+    rust = pd.read_csv(
+        "results_rs.csv",
+        names=["type", "n", "avx2_brute_ns", "branchless_ns", "branchy_ns"],
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5.2))
+    for ax, t in zip(axes, ["u8", "u16", "u32"]):
+        c = cpp[cpp["type"] == t]
+        r = rust[rust["type"] == t]
+        ax.plot(c["n"], c["branchless_ns"], marker="o", color="#1f77b4",
+                label="C++23 branchless")
+        ax.plot(r["n"], r["branchless_ns"], marker="s", color="#d62728",
+                label="Rust branchless")
+        ax.set_xscale("log", base=2)
+        ax.set_yscale("log")
+        ax.set_title(t)
+        ax.set_xlabel("n (array size)")
+        ax.set_ylabel("ns / query")
+        ax.grid(True, which="both", alpha=0.25)
+        ax.legend(fontsize=9)
+    fig.suptitle("Branchless binary search: C++23 vs Rust", fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig("cpp_vs_rust_branchless.webp", dpi=150)
+    plt.close(fig)
+
+    fig2, axes2 = plt.subplots(1, 3, figsize=(17, 5))
+    for ax, t in zip(axes2, ["u8", "u16", "u32"]):
+        c = cpp[cpp["type"] == t]
+        r = rust[rust["type"] == t]
+        ax.plot(c["n"], r["branchless_ns"] / c["branchless_ns"],
+                marker="o", color="#7f7f7f")
+        ax.axhline(1.0, color="black", lw=1)
+        ax.set_xscale("log", base=2)
+        ax.set_title(t)
+        ax.set_xlabel("n (array size)")
+        ax.set_ylabel("Rust / C++ time")
+        ax.grid(True, which="both", alpha=0.25)
+    fig2.suptitle("Branchless binary search ratio (below 1 = Rust faster)",
+                  fontsize=14)
+    fig2.tight_layout(rect=(0, 0, 1, 0.95))
+    fig2.savefig("cpp_vs_rust_branchless_ratio.webp", dpi=150)
+    plt.close(fig2)
+
+
 if __name__ == "__main__":
     plot_source("results.csv", "cpp23", "C++23 (-O3 -mavx2)")
     plot_source("results_rs.csv", "rust", "Rust (-O target-cpu=native)")
+    plot_cpp_vs_rust()

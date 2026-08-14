@@ -48,3 +48,18 @@ make plot              # 生成 4 张图 + 输出临界点
 ![Rust ratio](rust_ratio.webp)
 
 原始数据：`results.csv`（C++23）、`results_rs.csv`（Rust）。
+
+## C++23 vs Rust：无分支二分
+
+![C++23 vs Rust branchless](cpp_vs_rust_branchless.webp)
+
+![C++23 vs Rust branchless ratio](cpp_vs_rust_branchless_ratio.webp)
+
+两者整体在同一水平；大 n 时 Rust 略快一点（Rust 的 `partition_point` 生成的
+无分支循环在部分规模上更紧凑）：
+
+| 类型 / n | C++23 (ns) | Rust (ns) | Rust/C++ |
+| --- | ---: | ---: | ---: |
+| u8 / 256 | 3.78 | 3.69 | 0.98 |
+| u16 / 65536 | 14.99 | 14.34 | 0.96 |
+| u32 / 1048576 | 52.02 | 44.15 | 0.85 |
